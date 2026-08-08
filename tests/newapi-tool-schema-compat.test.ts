@@ -1,4 +1,3 @@
-\
 import { describe, expect, test } from "bun:test";
 import { createOpenAIChatAdapter } from "../src/adapters/openai-chat";
 import { createResponsesPassthroughAdapter } from "../src/adapters/openai-responses";
