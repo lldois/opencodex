@@ -8,6 +8,7 @@ import { isCyberPolicyCode } from "../lib/errors";
 import { redactSecretString } from "../lib/redact";
 import { contentPartsToText } from "./image";
 import { neutralizeIdentity } from "./identity";
+import { sanitizeGeminiToolParameters } from "./google-tool-schema";
 import { buildNonOpenAIToolCatalogNudgeForTools, shouldInjectNonOpenAIToolCatalogNudge } from "./tool-catalog-nudge";
 import { openRouterProviderPayload, resolveOpenRouterRouting } from "../providers/openrouter-routing";
 import {
@@ -472,12 +473,18 @@ function toolsToChatFormat(parsed: OcxParsedRequest, provider: OcxProviderConfig
   if (tools.length === 0) return undefined;
   const xaiTarget = isXaiSchemaTarget(provider);
   const kimiTarget = isKimiSchemaTarget(provider);
+  // Generic OpenAI-compatible gateways can route to Gemini/Claude. Detect the selected
+  // model rather than the gateway hostname so local $ref/$defs are flattened before
+  // NewAPI-style downstream function-schema conversion.
+  const googleBridgeTarget = /(?:^|[/_.:-])(?:claude|gemini)(?:$|[/_.:-])/i.test(parsed.modelId);
   const formatted = tools.flatMap(t => {
     const parameters = xaiTarget
       ? normalizeXaiToolParameters(t.parameters)
       : kimiTarget
         ? ensureKimiRootObjectType(t.parameters)
-        : t.parameters;
+        : googleBridgeTarget
+          ? sanitizeGeminiToolParameters(t.parameters)
+          : t.parameters;
     if (parameters === undefined) return [];
     return [{
     type: "function",

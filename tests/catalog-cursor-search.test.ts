@@ -9,9 +9,9 @@ describe("cursor catalog search advertising", () => {
     expect(entry.supports_parallel_tool_calls).toBe(true);
   });
 
-  test("non-cursor routed entries keep the sidecar-backed search advertisement", () => {
+  test("non-cursor routed entries keep sidecar web search but expose client tools directly", () => {
     const entry = normalizeRoutedCatalogEntry({ slug: "opencode-go/glm-5.2" } as never) as Record<string, unknown>;
-    expect(entry.supports_search_tool).toBe(true);
+    expect(entry.supports_search_tool).toBe(false);
     expect(entry.web_search_tool_type).toBe("text_and_image");
     expect(entry.supports_parallel_tool_calls).toBe(false);
   });
