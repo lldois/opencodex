@@ -9,6 +9,7 @@ import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
 import { OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
 import { modelRecordValue } from "../reasoning-effort";
 import type { TranslatorBudget } from "../lib/translator-budget";
+import { sanitizeGeminiToolParameters } from "./google-tool-schema";
 
 // Headers relayed verbatim from the caller in OAuth-passthrough ("forward") mode.
 // Exported so the web-search sidecar reuses the exact same forwarded-auth set for its ChatGPT call.
@@ -355,27 +356,45 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
 
-function normalizeFunctionToolSchema(tool: unknown): unknown {
-  if (!isPlainObject(tool) || tool.type !== "function") return tool;
-  if (isPlainObject(tool.parameters) && tool.parameters.type === "object") return tool;
-  return {
-    ...tool,
-    parameters: { ...(isPlainObject(tool.parameters) ? tool.parameters : {}), type: "object" },
-  };
+function shouldSanitizeGoogleBridgeSchemas(modelId: string): boolean {
+  return /(?:^|[/_.:-])(?:claude|gemini)(?:$|[/_.:-])/i.test(modelId);
 }
 
-function normalizeToolSchemas(body: unknown): unknown {
-  if (!isPlainObject(body)) return body;
+function normalizeFunctionToolSchema(tool: unknown, googleBridgeTarget: boolean): unknown {
+  if (!isPlainObject(tool) || tool.type !== "function") return tool;
+  const normalizedParameters = isPlainObject(tool.parameters) && tool.parameters.type === "object"
+    ? tool.parameters
+    : { ...(isPlainObject(tool.parameters) ? tool.parameters : {}), type: "object" };
+  const parameters = googleBridgeTarget
+    ? sanitizeGeminiToolParameters(normalizedParameters)
+    : normalizedParameters;
+  if (parameters === tool.parameters) return tool;
+  return { ...tool, parameters };
+}
 
-  const normalizeTools = (tools: unknown[]): unknown[] => {
+function normalizeToolSchemas(body: unknown, modelId: string): unknown {
+  if (!isPlainObject(body)) return body;
+  const googleBridgeTarget = shouldSanitizeGoogleBridgeSchemas(modelId);
+
+  function normalizeTools(tools: unknown[]): unknown[] {
     let changed = false;
     const normalized = tools.map((tool) => {
-      const fixed = normalizeFunctionToolSchema(tool);
-      if (fixed !== tool) changed = true;
-      return fixed;
+      const fixed = normalizeFunctionToolSchema(tool, googleBridgeTarget);
+      if (fixed !== tool) {
+        changed = true;
+        return fixed;
+      }
+      if (isPlainObject(tool) && tool.type === "namespace" && Array.isArray(tool.tools)) {
+        const nested = normalizeTools(tool.tools);
+        if (nested !== tool.tools) {
+          changed = true;
+          return { ...tool, tools: nested };
+        }
+      }
+      return tool;
     });
     return changed ? normalized : tools;
-  };
+  }
 
   let normalizedBody = body;
   if (Array.isArray(body.tools)) {
@@ -1024,7 +1043,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (parsed._compactionRequest === true && !isCanonicalOpenAiForwardProvider(provider)) {
         outBody = buildRoutedCompactionBody(outBody);
       }
-      const sanitizedBody = normalizeToolSchemas(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody))))))));
+      const sanitizedBody = normalizeToolSchemas(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody)))))))), parsed.modelId);
       const body = JSON.stringify(stripDisabledReasoningSummaries(
         normalizeConfiguredReasoningSummaryDelivery(sanitizedBody, provider, parsed.modelId),
         provider,
