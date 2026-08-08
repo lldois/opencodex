@@ -384,7 +384,7 @@ function normalizeToolSchemas(body: unknown, modelId: string): unknown {
         changed = true;
         return fixed;
       }
-      if (isPlainObject(tool) && tool.type === "namespace" && Array.isArray(tool.tools)) {
+      if (googleBridgeTarget && isPlainObject(tool) && tool.type === "namespace" && Array.isArray(tool.tools)) {
         const nested = normalizeTools(tool.tools);
         if (nested !== tool.tools) {
           changed = true;
