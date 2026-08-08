@@ -23,254 +23,183 @@ jobs:
           set -euo pipefail
           python3 <<'PY'
           from pathlib import Path
+          import re
+          import textwrap
 
-          def replace_once(path: str, old: str, new: str) -> None:
-              p = Path(path)
-              text = p.read_text()
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f"{path}: expected one replacement, found {count}")
-              p.write_text(text.replace(old, new, 1))
-
-          def replace_exact_count(path: str, old: str, new: str, expected: int) -> None:
+          def replace_count(path: str, old: str, new: str, expected: int = 1) -> None:
               p = Path(path)
               text = p.read_text()
               count = text.count(old)
               if count != expected:
-                  raise SystemExit(f"{path}: expected {expected} replacements for {old!r}, found {count}")
+                  raise SystemExit(f"{path}: expected {expected} occurrences of {old!r}, found {count}")
               p.write_text(text.replace(old, new))
 
-          # 1) Routed models: keep hosted web-search sidecar metadata, but disable Codex deferred
-          # tool_search. This makes MCP/App tools use the normal direct tool plan.
-          replace_once(
-              "src/codex/catalog/parsing.ts",
-              '''  // Routed providers use opencodex sidecars and client-executed tool discovery. The sidecar
-          // runs through native gpt-5.4-mini, so image search is available and verbalized for text-only
-          // models. EXCEPT cursor: its runTurn transport bypasses the web-search plan entirely and
-          // rejects server search queries — advertising the tool would make models call into a void.
-          if (isCursorEntry) {
-            delete entry.web_search_tool_type;
-            entry.supports_search_tool = false;
-          } else {
-            entry.web_search_tool_type = "text_and_image";
-            entry.supports_search_tool = true;
-          }
-          ''',
-              '''  // Hosted web search and deferred client-tool discovery are separate Codex capabilities.
-          // Routed providers can still use opencodex's gpt-5.4-mini web-search sidecar, but they must
-          // not advertise `supports_search_tool`: that flag makes Codex hide MCP/App tools behind its
-          // native `tool_search` protocol. Third-party chat/Responses models do not reliably round-trip
-          // that private protocol, so expose client tools through the normal direct tool plan instead.
-          if (isCursorEntry) {
-            delete entry.web_search_tool_type;
-          } else {
-            entry.web_search_tool_type = "text_and_image";
-          }
-          entry.supports_search_tool = false;
-          ''',
-          )
+          def regex_once(path: str, pattern: str, replacement: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              next_text, count = re.subn(pattern, replacement, text, count=1, flags=re.S)
+              if count != 1:
+                  raise SystemExit(f"{path}: regex replacement count={count} for {pattern!r}")
+              p.write_text(next_text)
 
-          # 2) OpenAI-compatible Chat Completions through a generic gateway (e.g. NewAPI): when the
-          # selected upstream model is Claude/Gemini, reuse the hardened Google/Claude schema sanitizer.
-          replace_once(
+          # 1) Disable Codex deferred tool_search for routed models. Hosted web search remains
+          # separately advertised through web_search_tool_type.
+          replace_count(
+              "src/codex/catalog/parsing.ts",
+              "    entry.supports_search_tool = true;",
+              "    entry.supports_search_tool = false;",
+          )
+          p = Path("src/codex/catalog/parsing.ts")
+          text = p.read_text()
+          text = text.replace(
+              "  // Routed providers use opencodex sidecars and client-executed tool discovery. The sidecar\n"
+              "  // runs through native gpt-5.4-mini, so image search is available and verbalized for text-only\n"
+              "  // models. EXCEPT cursor: its runTurn transport bypasses the web-search plan entirely and\n"
+              "  // rejects server search queries — advertising the tool would make models call into a void.\n",
+              "  // Hosted web search and deferred client-tool discovery are separate Codex capabilities.\n"
+              "  // Routed providers can still use opencodex's gpt-5.4-mini web-search sidecar. Keep\n"
+              "  // supports_search_tool=false so Codex exposes MCP/App tools directly instead of hiding\n"
+              "  // them behind the private tool_search protocol that third-party models may not round-trip.\n"
+              "  // Cursor still suppresses hosted search because runTurn bypasses the sidecar entirely.\n",
+          )
+          p.write_text(text)
+
+          # 2) OpenAI-compatible Chat Completions gateways (e.g. NewAPI): sanitize complex Codex/MCP
+          # schemas when the selected upstream model is Claude or Gemini.
+          replace_count(
               "src/adapters/openai-chat.ts",
               'import { neutralizeIdentity } from "./identity";\n',
               'import { neutralizeIdentity } from "./identity";\nimport { sanitizeGeminiToolParameters } from "./google-tool-schema";\n',
           )
-          replace_once(
+          replace_count(
               "src/adapters/openai-chat.ts",
-              '''  const xaiTarget = isXaiSchemaTarget(provider);
-          const kimiTarget = isKimiSchemaTarget(provider);
-          const formatted = tools.flatMap(t => {
-            const parameters = xaiTarget
-              ? normalizeXaiToolParameters(t.parameters)
-              : kimiTarget
-                ? ensureKimiRootObjectType(t.parameters)
-                : t.parameters;
-          ''',
-              '''  const xaiTarget = isXaiSchemaTarget(provider);
-          const kimiTarget = isKimiSchemaTarget(provider);
-          // Generic OpenAI-compatible gateways such as NewAPI can route a Chat Completions request
-          // to Gemini/Claude. Their downstream function-schema converters reject Codex/MCP JSON Schema
-          // features such as local $ref/$defs. Detect the selected model, not the gateway hostname.
-          const googleBridgeTarget = /(?:^|[/_.:-])(?:claude|gemini)(?:$|[/_.:-])/i.test(parsed.modelId);
-          const formatted = tools.flatMap(t => {
-            const parameters = xaiTarget
-              ? normalizeXaiToolParameters(t.parameters)
-              : kimiTarget
-                ? ensureKimiRootObjectType(t.parameters)
-                : googleBridgeTarget
-                  ? sanitizeGeminiToolParameters(t.parameters)
-                  : t.parameters;
-          ''',
+              "  const kimiTarget = isKimiSchemaTarget(provider);\n",
+              "  const kimiTarget = isKimiSchemaTarget(provider);\n"
+              "  // Generic OpenAI-compatible gateways can route to Gemini/Claude. Detect the selected\n"
+              "  // model rather than the gateway hostname so local $ref/$defs are flattened before\n"
+              "  // NewAPI-style downstream function-schema conversion.\n"
+              "  const googleBridgeTarget = /(?:^|[/_.:-])(?:claude|gemini)(?:$|[/_.:-])/i.test(parsed.modelId);\n",
+          )
+          replace_count(
+              "src/adapters/openai-chat.ts",
+              "      : kimiTarget\n        ? ensureKimiRootObjectType(t.parameters)\n        : t.parameters;",
+              "      : kimiTarget\n        ? ensureKimiRootObjectType(t.parameters)\n        : googleBridgeTarget\n          ? sanitizeGeminiToolParameters(t.parameters)\n          : t.parameters;",
           )
 
-          # 3) Same compatibility path for generic Responses passthrough. Recurse through Codex
-          # namespace/additional_tools containers, while leaving DeepSeek/other models unchanged.
-          replace_once(
+          # 3) Generic Responses passthrough: same Claude/Gemini sanitization, recursively through
+          # namespace and additional_tools containers. DeepSeek and other models retain full schemas.
+          replace_count(
               "src/adapters/openai-responses.ts",
               'import type { TranslatorBudget } from "../lib/translator-budget";\n',
               'import type { TranslatorBudget } from "../lib/translator-budget";\nimport { sanitizeGeminiToolParameters } from "./google-tool-schema";\n',
           )
-          replace_once(
-              "src/adapters/openai-responses.ts",
-              '''function normalizeFunctionToolSchema(tool: unknown): unknown {
-          if (!isPlainObject(tool) || tool.type !== "function") return tool;
-          if (isPlainObject(tool.parameters) && tool.parameters.type === "object") return tool;
-          return {
-            ...tool,
-            parameters: { ...(isPlainObject(tool.parameters) ? tool.parameters : {}), type: "object" },
-          };
-          }
-
-          function normalizeToolSchemas(body: unknown): unknown {
-          if (!isPlainObject(body)) return body;
-
-          const normalizeTools = (tools: unknown[]): unknown[] => {
-            let changed = false;
-            const normalized = tools.map((tool) => {
-              const fixed = normalizeFunctionToolSchema(tool);
-              if (fixed !== tool) changed = true;
-              return fixed;
-            });
-            return changed ? normalized : tools;
-          };
-
-          let normalizedBody = body;
-          if (Array.isArray(body.tools)) {
-            const tools = normalizeTools(body.tools);
-            if (tools !== body.tools) normalizedBody = { ...normalizedBody, tools };
-          }
-          if (Array.isArray(normalizedBody.input)) {
-            let inputChanged = false;
-            const input = normalizedBody.input.map((item) => {
-              if (!isPlainObject(item) || item.type !== "additional_tools" || !Array.isArray(item.tools)) return item;
-              const tools = normalizeTools(item.tools);
-              if (tools === item.tools) return item;
-              inputChanged = true;
-              return { ...item, tools };
-            });
-            if (inputChanged) normalizedBody = { ...normalizedBody, input };
-          }
-          return normalizedBody;
-          }
-          ''',
-              '''function shouldSanitizeGoogleBridgeSchemas(modelId: string): boolean {
-          return /(?:^|[/_.:-])(?:claude|gemini)(?:$|[/_.:-])/i.test(modelId);
+          new_normalizer = textwrap.dedent('''\
+          function shouldSanitizeGoogleBridgeSchemas(modelId: string): boolean {
+            return /(?:^|[/_.:-])(?:claude|gemini)(?:$|[/_.:-])/i.test(modelId);
           }
 
           function normalizeFunctionToolSchema(tool: unknown, googleBridgeTarget: boolean): unknown {
-          if (!isPlainObject(tool) || tool.type !== "function") return tool;
-          const normalizedParameters = isPlainObject(tool.parameters) && tool.parameters.type === "object"
-            ? tool.parameters
-            : { ...(isPlainObject(tool.parameters) ? tool.parameters : {}), type: "object" };
-          const parameters = googleBridgeTarget
-            ? sanitizeGeminiToolParameters(normalizedParameters)
-            : normalizedParameters;
-          if (parameters === tool.parameters) return tool;
-          return { ...tool, parameters };
+            if (!isPlainObject(tool) || tool.type !== "function") return tool;
+            const normalizedParameters = isPlainObject(tool.parameters) && tool.parameters.type === "object"
+              ? tool.parameters
+              : { ...(isPlainObject(tool.parameters) ? tool.parameters : {}), type: "object" };
+            const parameters = googleBridgeTarget
+              ? sanitizeGeminiToolParameters(normalizedParameters)
+              : normalizedParameters;
+            if (parameters === tool.parameters) return tool;
+            return { ...tool, parameters };
           }
 
           function normalizeToolSchemas(body: unknown, modelId: string): unknown {
-          if (!isPlainObject(body)) return body;
-          const googleBridgeTarget = shouldSanitizeGoogleBridgeSchemas(modelId);
+            if (!isPlainObject(body)) return body;
+            const googleBridgeTarget = shouldSanitizeGoogleBridgeSchemas(modelId);
 
-          function normalizeTool(tool: unknown): unknown {
-            const fixed = normalizeFunctionToolSchema(tool, googleBridgeTarget);
-            if (fixed !== tool) return fixed;
-            if (!isPlainObject(tool) || tool.type !== "namespace" || !Array.isArray(tool.tools)) return tool;
-            const tools = normalizeTools(tool.tools);
-            return tools === tool.tools ? tool : { ...tool, tools };
-          }
+            function normalizeTools(tools: unknown[]): unknown[] {
+              let changed = false;
+              const normalized = tools.map((tool) => {
+                const fixed = normalizeFunctionToolSchema(tool, googleBridgeTarget);
+                if (fixed !== tool) {
+                  changed = true;
+                  return fixed;
+                }
+                if (isPlainObject(tool) && tool.type === "namespace" && Array.isArray(tool.tools)) {
+                  const nested = normalizeTools(tool.tools);
+                  if (nested !== tool.tools) {
+                    changed = true;
+                    return { ...tool, tools: nested };
+                  }
+                }
+                return tool;
+              });
+              return changed ? normalized : tools;
+            }
 
-          function normalizeTools(tools: unknown[]): unknown[] {
-            let changed = false;
-            const normalized = tools.map((tool) => {
-              const fixed = normalizeTool(tool);
-              if (fixed !== tool) changed = true;
-              return fixed;
-            });
-            return changed ? normalized : tools;
+            let normalizedBody = body;
+            if (Array.isArray(body.tools)) {
+              const tools = normalizeTools(body.tools);
+              if (tools !== body.tools) normalizedBody = { ...normalizedBody, tools };
+            }
+            if (Array.isArray(normalizedBody.input)) {
+              let inputChanged = false;
+              const input = normalizedBody.input.map((item) => {
+                if (!isPlainObject(item) || item.type !== "additional_tools" || !Array.isArray(item.tools)) return item;
+                const tools = normalizeTools(item.tools);
+                if (tools === item.tools) return item;
+                inputChanged = true;
+                return { ...item, tools };
+              });
+              if (inputChanged) normalizedBody = { ...normalizedBody, input };
+            }
+            return normalizedBody;
           }
-
-          let normalizedBody = body;
-          if (Array.isArray(body.tools)) {
-            const tools = normalizeTools(body.tools);
-            if (tools !== body.tools) normalizedBody = { ...normalizedBody, tools };
-          }
-          if (Array.isArray(normalizedBody.input)) {
-            let inputChanged = false;
-            const input = normalizedBody.input.map((item) => {
-              if (!isPlainObject(item) || item.type !== "additional_tools" || !Array.isArray(item.tools)) return item;
-              const tools = normalizeTools(item.tools);
-              if (tools === item.tools) return item;
-              inputChanged = true;
-              return { ...item, tools };
-            });
-            if (inputChanged) normalizedBody = { ...normalizedBody, input };
-          }
-          return normalizedBody;
-          }
-          ''',
-          )
-          replace_once(
+          ''')
+          regex_once(
               "src/adapters/openai-responses.ts",
-              'const sanitizedBody = normalizeToolSchemas(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody))))))));',
-              'const sanitizedBody = normalizeToolSchemas(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody)))))))), parsed.modelId);',
+              r"function normalizeFunctionToolSchema\(tool: unknown\): unknown \{.*?\n\}\n\nfunction normalizeToolSchemas\(body: unknown\): unknown \{.*?\n\}\n\n(?=const MAX_RESPONSES_CALL_ID_LENGTH)",
+              new_normalizer + "\n",
+          )
+          replace_count(
+              "src/adapters/openai-responses.ts",
+              "const sanitizedBody = normalizeToolSchemas(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody))))))));",
+              "const sanitizedBody = normalizeToolSchemas(stripSparkCompatibility(stripUnsupportedReasoningParams(stripItemIdsWhenUnstored(stripInvalidItemIds(stripUnsupportedHostedTools(sanitizeReasoningInputContent(scrubOcxCompactionItems(outBody)))))))), parsed.modelId);",
           )
 
-          # 4) Update existing catalog regression expectations. Native OpenAI rows intentionally keep true.
-          replace_once(
+          # 4) Existing regression expectations. Native OpenAI rows deliberately remain true.
+          replace_count(
               "tests/catalog-cursor-search.test.ts",
-              '''  test("non-cursor routed entries keep the sidecar-backed search advertisement", () => {
-            const entry = normalizeRoutedCatalogEntry({ slug: "opencode-go/glm-5.2" } as never) as Record<string, unknown>;
-            expect(entry.supports_search_tool).toBe(true);
-            expect(entry.web_search_tool_type).toBe("text_and_image");
-            expect(entry.supports_parallel_tool_calls).toBe(false);
-          });
-          ''',
-              '''  test("non-cursor routed entries keep sidecar web search but expose client tools directly", () => {
-            const entry = normalizeRoutedCatalogEntry({ slug: "opencode-go/glm-5.2" } as never) as Record<string, unknown>;
-            expect(entry.supports_search_tool).toBe(false);
-            expect(entry.web_search_tool_type).toBe("text_and_image");
-            expect(entry.supports_parallel_tool_calls).toBe(false);
-          });
-          ''',
+              'test("non-cursor routed entries keep the sidecar-backed search advertisement", () => {',
+              'test("non-cursor routed entries keep sidecar web search but expose client tools directly", () => {',
           )
-          replace_once(
+          replace_count(
+              "tests/catalog-cursor-search.test.ts",
+              "    expect(entry.supports_search_tool).toBe(true);",
+              "    expect(entry.supports_search_tool).toBe(false);",
+          )
+          replace_count(
               "tests/e2e-style/phase100-native-parity.test.ts",
-              '''    expect(routed).toMatchObject({
-                web_search_tool_type: "text_and_image",
-                supports_search_tool: true,
-          ''',
-              '''    expect(routed).toMatchObject({
-                web_search_tool_type: "text_and_image",
-                supports_search_tool: false,
-          ''',
+              '      supports_search_tool: true,\n      context_window: 1_000_000,',
+              '      supports_search_tool: false,\n      context_window: 1_000_000,',
           )
-          replace_exact_count(
+          replace_count(
               "tests/codex-catalog.test.ts",
-              'expect(row.supports_search_tool).toBe(true);',
-              'expect(row.supports_search_tool).toBe(false);',
-              1,
+              "expect(row.supports_search_tool).toBe(true);",
+              "expect(row.supports_search_tool).toBe(false);",
           )
-          replace_exact_count(
+          replace_count(
               "tests/codex-catalog.test.ts",
-              'expect(entry.supports_search_tool).toBe(true);',
-              'expect(entry.supports_search_tool).toBe(false);',
-              1,
+              "expect(entry.supports_search_tool).toBe(true);",
+              "expect(entry.supports_search_tool).toBe(false);",
           )
-          replace_exact_count(
+          replace_count(
               "tests/codex-catalog.test.ts",
-              'expect(routed?.supports_search_tool).toBe(true);',
-              'expect(routed?.supports_search_tool).toBe(false);',
-              2,
+              "expect(routed?.supports_search_tool).toBe(true);",
+              "expect(routed?.supports_search_tool).toBe(false);",
+              expected=2,
           )
 
-          # 5) End-to-end adapter-level regression for the exact NewAPI failure mode: Gmail-style
-          # local refs must be flattened for Claude/Gemini on both OpenAI-compatible wires, while
-          # DeepSeek keeps its full schema untouched.
-          Path("tests/newapi-tool-schema-compat.test.ts").write_text(r'''import { describe, expect, test } from "bun:test";
+          # 5) Adapter-level regression for the exact NewAPI + Gmail $ref/$defs failure mode.
+          test_source = textwrap.dedent(r'''\
+          import { describe, expect, test } from "bun:test";
           import { createOpenAIChatAdapter } from "../src/adapters/openai-chat";
           import { createResponsesPassthroughAdapter } from "../src/adapters/openai-responses";
           import { createTranslatorBudget } from "../src/lib/translator-budget";
@@ -418,10 +347,10 @@ jobs:
               }
             });
           });
-          '''.replace("          ", ""))
+          ''')
+          Path("tests/newapi-tool-schema-compat.test.ts").write_text(test_source)
 
-          # The bootstrap workflow is only a transport for applying the patch through GitHub's own
-          # runner; remove it from the resulting source commit.
+          # This workflow is a one-shot transport for the patch.
           Path(".github/workflows/bootstrap-direct-tools-fix.yml").unlink()
           PY
 
