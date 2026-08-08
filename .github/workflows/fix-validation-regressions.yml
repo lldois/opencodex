@@ -1,0 +1,56 @@
+name: Fix compatibility regression findings
+
+on:
+  push:
+    branches:
+      - fix/direct-tools-portable-schemas
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/direct-tools-portable-schemas
+          fetch-depth: 0
+      - name: Apply fixes and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one match, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          # Template-less routed catalog rows must follow the same direct-tool policy.
+          replace_once(
+              "src/codex/catalog/sync.ts",
+              '...(isRouted ? { web_search_tool_type: "text_and_image", supports_search_tool: true } : {}),',
+              '...(isRouted ? { web_search_tool_type: "text_and_image", supports_search_tool: false } : {}),',
+          )
+
+          # Preserve historical namespace bytes for non-Claude/Gemini Responses targets.
+          # Nested namespace schema normalization is needed only on the Google/Claude bridge path.
+          replace_once(
+              "src/adapters/openai-responses.ts",
+              '      if (isPlainObject(tool) && tool.type === "namespace" && Array.isArray(tool.tools)) {',
+              '      if (googleBridgeTarget && isPlainObject(tool) && tool.type === "namespace" && Array.isArray(tool.tools)) {',
+          )
+
+          Path('.github/workflows/fix-validation-regressions.yml').unlink()
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "fix: preserve non-Google namespace schemas and fallback direct tools"
+          git push origin HEAD:fix/direct-tools-portable-schemas
