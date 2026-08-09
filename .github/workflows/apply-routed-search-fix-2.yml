@@ -1,0 +1,35 @@
+name: Apply routed search catalog restoration
+
+on:
+  push:
+    branches:
+      - fix/restore-routed-native-search
+    paths:
+      - ".github/workflows/apply-routed-search-fix-2.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore pre-workaround routed catalog behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout 8a9c0efa795faf6e600fba2269303e4fe56c7361 -- \
+            src/codex/catalog/parsing.ts \
+            src/codex/catalog/sync.ts \
+            tests/catalog-cursor-search.test.ts \
+            tests/codex-catalog.test.ts \
+            tests/e2e-style/phase100-native-parity.test.ts
+          rm .github/workflows/apply-routed-search-fix-2.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: re-enable routed Codex search capability"
+          git push origin HEAD:fix/restore-routed-native-search
