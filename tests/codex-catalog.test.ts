@@ -289,7 +289,7 @@ describe("combo catalog capability intersection", () => {
       expect(row).not.toHaveProperty("model_messages");
       expect(row).not.toHaveProperty("tool_mode");
       expect(row.web_search_tool_type).toBe("text_and_image");
-      expect(row.supports_search_tool).toBe(false);
+      expect(row.supports_search_tool).toBe(true);
     }
   });
 
@@ -952,7 +952,7 @@ describe("Codex catalog routed normalization", () => {
     expect(entry).not.toHaveProperty("service_tiers");
     expect(entry).not.toHaveProperty("default_service_tier");
     expect(entry.web_search_tool_type).toBe("text_and_image");
-    expect(entry.supports_search_tool).toBe(false);
+    expect(entry.supports_search_tool).toBe(true);
   });
 
   test("buildCatalogEntries strips routed entries cloned from native templates", () => {
@@ -974,7 +974,7 @@ describe("Codex catalog routed normalization", () => {
     expect(routed).not.toHaveProperty("service_tiers");
     expect(routed).not.toHaveProperty("default_service_tier");
     expect(routed?.web_search_tool_type).toBe("text_and_image");
-    expect(routed?.supports_search_tool).toBe(false);
+    expect(routed?.supports_search_tool).toBe(true);
     expect(routed?.supports_reasoning_summaries).toBe(false);
     expect(routed?.base_instructions).not.toBe(nativeTemplate().base_instructions);
     expect(routed?.base_instructions).toContain("claude-sonnet-4-6");
@@ -1235,7 +1235,7 @@ describe("Codex catalog routed normalization", () => {
     const routed = entries.find(e => e.slug === "local/qwen3-coder");
 
     expect(routed?.web_search_tool_type).toBe("text_and_image");
-    expect(routed?.supports_search_tool).toBe(false);
+    expect(routed?.supports_search_tool).toBe(true);
   });
 
   test("liveModels false uses configured provider models without fetching", async () => {
