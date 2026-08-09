@@ -1,0 +1,67 @@
+name: Apply routed native search fix
+
+on:
+  push:
+    branches:
+      - fix/restore-routed-native-search
+    paths:
+      - ".github/workflows/apply-routed-search-fix.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Restore routed search capability and add regression test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The previous compatibility patch disabled supports_search_tool in an attempt
+          # to avoid deferred tool_search. OpenCodex 2.10 already bridges tool_search for
+          # third-party models, and disabling the capability also hides Codex native Web Search.
+          git checkout HEAD^ -- \
+            src/codex/catalog/parsing.ts \
+            src/codex/catalog/sync.ts \
+            tests/catalog-cursor-search.test.ts \
+            tests/codex-catalog.test.ts \
+            tests/e2e-style/phase100-native-parity.test.ts
+
+          cat > tests/routed-native-search-bridge.test.ts <<'EOF'
+          import { describe, expect, test } from "bun:test";
+          import { parseRequest } from "../src/responses/parser";
+          import { buildToolBridgeMaps } from "../src/server/responses/collaboration";
+
+          describe("routed native search and deferred tool bridge", () => {
+            test("web_search and tool_search remain available together for routed models", () => {
+              const parsed = parseRequest({
+                model: "newapi/gemini-3.6-pro",
+                input: "search then use a client tool",
+                tools: [
+                  { type: "web_search" },
+                  { type: "tool_search", description: "Search for additional client tools" },
+                ],
+              });
+
+              expect(parsed._webSearch).toBeDefined();
+              const toolSearch = parsed.context.tools?.find(tool => tool.name === "tool_search");
+              expect(toolSearch?.toolSearch).toBe(true);
+
+              const maps = buildToolBridgeMaps(parsed);
+              expect(maps.toolSearchToolNames.has("tool_search")).toBe(true);
+            });
+          });
+          EOF
+
+          rm .github/workflows/apply-routed-search-fix.yml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "fix: restore native search for routed models"
+          git push origin HEAD:fix/restore-routed-native-search
